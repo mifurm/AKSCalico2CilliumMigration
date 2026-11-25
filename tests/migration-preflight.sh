@@ -15,13 +15,14 @@ case "$1 $2" in
   "version -o") jq -n --arg version "${TEST_CLI:-2.88.0}" '{"azure-cli":$version}' ;;
   "aks show")
     jq -n --arg os "${TEST_OS:-Linux}" --arg dp "${TEST_DATAPLANE:-azure}" --arg mode "${TEST_NAP:-Manual}" \
-      --arg plan "${TEST_PLAN:-KubernetesOfficial}" \
+      --arg plan "${TEST_PLAN:-KubernetesOfficial}" --arg tier "${TEST_TIER:-Free}" --arg power "${TEST_POWER:-Running}" \
       '{provisioningState:"Succeeded",currentKubernetesVersion:"1.35.9",
-        supportPlan:$plan,
+        kubernetesVersion:"1.35.9",supportPlan:$plan,sku:{tier:$tier},powerState:{code:$power},
         networkProfile:{networkPlugin:"azure",networkPluginMode:"overlay",networkDataplane:$dp,
           networkPolicy:(if $dp == "cilium" then "cilium" else "calico" end)},
         nodeProvisioningProfile:{mode:$mode},
-        agentPoolProfiles:[{name:"system",count:1,osType:$os,provisioningState:"Succeeded",enableAutoScaling:false}]}'
+        agentPoolProfiles:[{name:"system",count:1,osType:$os,provisioningState:"Succeeded",
+          currentOrchestratorVersion:"1.35.9",enableAutoScaling:false}]}'
     ;;
   "aks get-credentials")
     while [[ $# -gt 0 ]]; do
@@ -37,6 +38,9 @@ set -eu
 printf 'kubectl %s\n' "$*" >> "$TEST_CALLS"
 if [[ "$*" == *jsonpath* ]]; then printf '192.0.2.1'; exit 0; fi
 if [[ "$*" == *"get deployment"* ]]; then echo '{"spec":{"replicas":1},"status":{"availableReplicas":1}}'; exit 0; fi
+if [[ "$*" == *"get pods,deployments,services,networkpolicies"* || "$*" == *"get daemonset cilium"* ]]; then
+  echo '{"items":[]}'; exit 0
+fi
 case "$1 $2" in
   "get crds")
     if [[ "${TEST_CUSTOM_POLICY:-false}" == true || "${TEST_MANAGED_POLICY:-false}" == true ]]; then
@@ -61,7 +65,7 @@ while [[ $# -gt 0 ]]; do
   if [[ "$1" == -o ]]; then printf 'AKS Calico sample is running\n' > "$2"; exit 0; fi
   shift
 done
-exit 92
+printf 'AKS Calico sample is running\n'
 SH
 chmod +x "$WORK/bin/"*
 run_case() {
@@ -108,4 +112,28 @@ TEST_DATAPLANE=cilium TEST_PLAN=AKSLongTermSupport bash "$WORK/deploy.sh" > "$WO
 grep -Fq "Refusing to disable LTS" "$WORK/lts-guard.log"
 if grep -q 'az deployment' "$TEST_CALLS"; then echo "LTS guard submitted deployment" >&2; exit 1; fi
 echo "PASS: deployment-refuses-lts-downgrade"
+cp "$ROOT/migrate-to-lts.sh" "$WORK/"
+for case_name in lts-check-cilium lts-block-calico lts-block-stopped; do
+  : > "$TEST_CALLS"
+  status=0
+  case "$case_name" in
+    lts-check-cilium)
+      expected=0
+      TEST_DATAPLANE=cilium TEST_PLAN=AKSLongTermSupport TEST_TIER=Premium \
+        bash "$WORK/migrate-to-lts.sh" --check-only > "$WORK/$case_name.log" 2>&1 || status=$? ;;
+    lts-block-calico)
+      expected=2
+      bash "$WORK/migrate-to-lts.sh" --check-only > "$WORK/$case_name.log" 2>&1 || status=$? ;;
+    lts-block-stopped)
+      expected=1
+      TEST_POWER=Stopped bash "$WORK/migrate-to-lts.sh" > "$WORK/$case_name.log" 2>&1 || status=$? ;;
+  esac
+  if [[ "$status" -ne "$expected" ]]; then
+    cat "$WORK/$case_name.log"; echo "$case_name: expected $expected, got $status" >&2; exit 1
+  fi
+  if grep -Eq 'az aks (update|nodepool)|kubectl.*(scale|apply|delete)' "$TEST_CALLS"; then
+    echo "$case_name: unexpected mutation" >&2; exit 1
+  fi
+  echo "PASS: $case_name"
+done
 echo "All focused migration preflight tests passed."

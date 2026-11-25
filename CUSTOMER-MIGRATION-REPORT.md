@@ -1,19 +1,24 @@
-# AKS Calico to Cilium migration — execution report
+# AKS Calico to Cilium migration and LTS enrollment — execution report
 
-**Execution date:** 24 November 2026 (all execution timestamps below are UTC).  
+**Execution dates:** 24 November 2026 (network migration), updated
+25 November 2026 (LTS enrollment). All execution timestamps below are UTC.  
 **Scope:** Fresh deployment of the supplied minimal demonstration, followed by
-the Microsoft-supported Azure CNI data-plane migration. No LTS enrollment.
+the Microsoft-supported Azure CNI data-plane migration and subsequent
+explicitly authorized Premium/LTS enrollment.
 
 ## Executive outcome
 
-**Deployment and migration completed successfully.** Azure CNI Overlay now
+**Deployment, networking migration, and subsequent LTS enrollment completed
+successfully.** Azure CNI Overlay now
 uses **Cilium 1.18.16** instead of Calico. Kubernetes **1.35.9**, **Free**
-tier, **KubernetesOfficial** support, the public application IP and native
-Kubernetes policy specifications were retained. Final capacity is the
-intended **one node and one ready NGINX replica**. No Premium/LTS enrollment
-or resource-group deletion was performed; billable resources remain running.
+tier and **KubernetesOfficial** support were retained during the 24 November
+networking migration. On 25 November, the existing 1.35.9 cluster was enrolled
+in **Premium / AKSLongTermSupport**, without changing Cilium, Overlay or the
+public app IP. Final capacity remains **one node and one ready NGINX replica**.
+No resource-group deletion was performed; billable resources remain running,
+now with additional Premium control-plane charges.
 
-The successful Azure update took **16m 39s**. Across **548 HTTP probes**
+The successful networking update took **16m 39s**. Across **548 HTTP probes**
 covering migration and restoration, **zero failures were observed**;
 **461** probes fell within the update-command interval, also with zero
 failures. This is sampled observation, **not an availability guarantee or
@@ -23,6 +28,136 @@ execution blocker remains.
 
 The deployed application endpoint is
 **http://20.76.10.249/** (public, unauthenticated HTTP; demonstration content only).
+
+## Follow-up: successful LTS enrollment on 25 November 2026
+
+### Outcome and customer interpretation
+
+The earlier managed-Calico LTS attempt had been rejected with
+`LTSUnsupportedAddon`. After the supported Cilium migration, Azure accepted
+the same Premium/LTS enrollment. The final live state is:
+
+| Item | Before LTS enrollment (after startup recovery) | After enrollment |
+|---|---|---|
+| Kubernetes control plane / kubelet | 1.35.9 / v1.35.9 | Unchanged |
+| Tier / support plan | Free / KubernetesOfficial | Premium / AKSLongTermSupport |
+| Provisioning / power | Succeeded / Running | Succeeded / Running |
+| Networking | Azure CNI Overlay, Cilium | Unchanged complete network profile |
+| Node / app replicas | One / one | One / one |
+| Public application | HTTP 200 at 20.76.10.249 | Same IP and expected response |
+| Node object name, UID and addresses | Captured before update | Unchanged |
+| App pod, deployment, service and policy UIDs/specifications | Captured before update | Unchanged |
+| App container restart count | 0 | 0 |
+| Cilium DaemonSet UID/specification | Captured before update | Unchanged |
+| Node-pool configuration | Captured before update | Only the Azure `eTag` changed |
+| Resource tags / automatic upgrades | Ignore / none / NodeImage | Unchanged |
+
+This is **LTS support-plan enrollment**, not a Kubernetes minor or patch
+upgrade. There is no separate `1.35 LTS` version string. No node replacement
+or application restart was observed during the enrollment interval.
+
+### Actual procedure and measured availability
+
+1. Confirmed that the cluster used Cilium, not managed Calico.
+2. Recovered the stopped cluster and validated API, node and app readiness.
+3. Checked control-plane, node-pool and live kubelet versions; captured
+   Azure, node, app, service, policy and Cilium snapshots.
+4. Ran the enrollment with public HTTP monitoring:
+
+```bash
+# Process-local DNS setting used for this client's startup DNS-cache issue:
+GODEBUG=netdns=go bash migrate-to-lts.sh
+```
+
+The script submitted:
+
+```bash
+az aks update --subscription 1217c203-6c76-47b4-b61c-9bba62dc8e02 \
+  -g rg-aks-calico-support -n aks-calico-support \
+  --tier premium --k8s-support-plan AKSLongTermSupport \
+  --only-show-errors -o none
+```
+
+5. Verified successful Azure provisioning, Premium/LTS enrollment, unchanged
+   Kubernetes patch/networking/public IP, Cilium rollout, node readiness and
+   the expected app response.
+6. Repeated `migrate-to-lts.sh --check-only`: exit **0**, no Azure mutation.
+
+The Azure update ran **05:44:05–05:51:05 UTC (7m 00s)**.
+The full successful script ran **05:43:52–05:51:13 UTC (7m 21s)** and exited
+**0**. HTTP monitoring started before the update and continued through final
+checks: **200 probes, zero observed failures**. Probes are approximately two
+seconds apart plus request time and check HTTP status and the stable response
+marker. This is sampled evidence, not a continuous-availability guarantee,
+load test, or proof of security-policy equivalence.
+
+### Challenges and issues affecting the procedure
+
+- **Cluster was stopped before enrollment.** Azure showed `Stopped` with
+  VM scale-set capacity zero. API DNS did not resolve and the app request
+  failed. The first preflight exited before submitting an LTS update.
+  The stop's origin was not investigated or attributed to this migration.
+  We explicitly started the cluster using `az aks start` at approximately
+  **05:38:30 UTC**. Start completed successfully; application and API recovery
+  were verified before the successful enrollment.
+- **DNS recovery lag on the client.** Two further preflight attempts after
+  startup still failed in kubectl with `no such host`, without submitting
+  an LTS update. Local/public `dig` then resolved the API to `20.76.214.64`,
+  while kubectl's default resolver continued to fail. A process-local
+  `GODEBUG=netdns=go` setting made kubectl work. No system DNS, hosts file,
+  TLS validation or shared machine setting was modified. Production procedures
+  should wait for API DNS and client resolution to recover after start.
+- **Separate startup disruption from enrollment.** The app was unreachable
+  while stopped; these failures are not included in the 200 enrollment probes.
+  Total startup outage duration was not continuously monitored and is not
+  claimed. An already-running production cluster does not need this step.
+- **Premium adds charges.** The previous Free control-plane cost assumptions
+  below describe the networking experiment, not the new final state.
+  Premium control-plane charges now apply in addition to worker, disk,
+  load-balancer, public-IP and traffic costs. No price quote is implied.
+  A control-plane SLA does not make a one-node/one-replica app highly available.
+- **Patch maintenance remains required.** West Europe offered 1.35.9 and
+  1.35.8 as its two latest 1.35 patches at verification. No patch upgrade
+  was needed. Automatic upgrades remain `none` to preserve the existing
+  experiment's settings. Microsoft recommends the `patch` channel and
+  supports only the latest two patches during LTS; the customer must establish
+  patch maintenance or separately enable that channel and a maintenance window.
+  The current published 1.35 LTS end-of-life is **31 March 2028**, subject to
+  lifecycle updates and staying on supported patches.
+
+### Code, validation and evidence
+
+`migrate-to-lts.sh` now explicitly rejects stopped clusters and verifies
+Cilium readiness, captures workload snapshots and monitors HTTP for the
+enrollment. Bicep exposes explicit tier/support parameters;
+`infra/deployment.parameters.json` now selects **Cilium, Premium and
+AKSLongTermSupport**. `deploy.sh` verifies these configured values and refuses
+an accidental LTS downgrade, as well as Cilium reversion.
+
+Shell syntax, Bicep compilation, **13 focused mocked preflight/guard tests**,
+live LTS check-only verification and Azure subscription deployment validation
+all passed. The additional tests cover LTS downgrade refusal, healthy
+Cilium/LTS check-only, managed-Calico rejection and stopped-cluster rejection.
+HTTP helpers completed and a process check found none remaining.
+No full infrastructure redeployment was necessary for enrollment.
+
+- Successful enrollment and monitoring:
+  `.local/lts-migration-20261125T054352Z-pOHuwy/`.
+  Includes `outcome.log`, `before.json`, `after.json`, before/after node,
+  app and Cilium snapshots, `update-start.txt`, `update-end.txt`, `http.csv`
+  and `http-summary.json`.
+- Initial stopped-cluster failure:
+  `.local/lts-migration-20261125T053743Z-1LLLOb/`.
+- Post-start resolver failures:
+  `.local/lts-migration-20261125T054311Z-JdLzRS/` and
+  `.local/lts-migration-20261125T054333Z-0wsZo9/`.
+- Successful final check-only:
+  `.local/lts-migration-20261125T055122Z-Jvnxet/`.
+- [Microsoft: LTS enrollment, pricing and supported patch requirements](https://learn.microsoft.com/azure/aks/long-term-support)
+- [Microsoft: AKS release and LTS lifecycle calendar](https://learn.microsoft.com/azure/aks/supported-kubernetes-versions#lts-versions)
+
+The remaining networking-migration sections below preserve the
+**24 November execution history** and its then-current Free/non-LTS baseline.
 
 ## Environment and authorization
 

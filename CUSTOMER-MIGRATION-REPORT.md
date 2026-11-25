@@ -400,6 +400,87 @@ rate for that entire interval, its compute illustration would be about
 invoice amount. Up to three registered workers were actually observed, so
 transient compute could exceed the two-worker illustration.
 
+## Network-policy changes required when moving from Calico to Cilium
+
+**Not every policy needs rewriting.** Cilium supports native
+`networking.k8s.io/v1` `NetworkPolicy` resources, so compatible Kubernetes
+policies can remain in place. However, preserving YAML does not prove that
+all traffic paths retain the intended enforcement. Complete the inventory
+and translation **before migration**, then validate enforcement **after
+all node reimages finish**, before customer acceptance.
+
+### Required review and conditional changes
+
+| Existing policy or dependency | Required action |
+|---|---|
+| Native Kubernetes ingress/egress `NetworkPolicy` | Retain compatible manifests. Review pod/namespace labels, direction, protocols, ports and default-deny coverage; validate permitted and prohibited traffic after migration. Conversion to `CiliumNetworkPolicy` is not mandatory. |
+| Calico-specific `NetworkPolicy`, `GlobalNetworkPolicy`, network sets or host endpoints | Do not assume automatic conversion. Identify the intended access controls and recreate them using native Kubernetes policies where sufficient, or supported Cilium policy resources. Calico CRDs are not enforced by the replacement Cilium engine. The demonstration script blocks custom Calico policy/set resources instead of translating them. |
+| Calico rule ordering, tiers, explicit deny or host/pre-DNAT controls | Redesign rather than mechanically copy YAML. Kubernetes policies are additive allow rules; there is no equivalent ordered Calico rule list in a native `NetworkPolicy`. For advanced behavior, assess Cilium deny/clusterwide capabilities against AKS's supported feature set. Do not assume every Calico host or pre-DNAT feature has a supported one-to-one replacement. |
+| `ipBlock` rules used to allow pod IPs or pod CIDRs | Change internal pod access to appropriate `namespaceSelector`/`podSelector` rules. Microsoft documents that Cilium's `ipBlock` cannot select pod or node IPs, even when the CIDR is `0.0.0.0/0`. Keep external CIDRs only where appropriate; do not broaden internal access to all pods merely to restore connectivity. |
+| `ipBlock` rules used to allow node IPs | Do not retain these as an assumed node-access exception. Native `ipBlock` cannot express this allow path under AKS Cilium. Assess the specific node service and a supported host/entity or alternative network-control design; test the chosen solution before cutover. |
+| Policies covering DNS and application dependencies | If egress isolation is enabled, explicitly allow the actual DNS path, including UDP/TCP 53 where required, and required backend/external destinations. Use namespace/pod selectors for CoreDNS pods. LocalDNS/node-local paths require separate review; do not assume an external-CIDR allow also permits node-local DNS. Adding egress isolation is not required simply because the engine changed. |
+| LoadBalancer, NodePort or ingress-controller paths | Verify the source identity/address seen at the destination, service translation and `externalTrafficPolicy`. Explicitly allow the intended public or ingress-controller path where required and confirm unwanted sources remain denied. NPM-specific bypass behavior is not evidence of Calico behavior. |
+| `hostNetwork: true` workloads | Do not assume ordinary pod policies protect these workloads. Microsoft documents that these pods use the host identity and are not covered by pod network-policy enforcement. Review host/network controls separately rather than silently relying on the old policy. |
+| Named ports, port ranges (`endPort`), selectors and exceptions | Inventory their use and test against the deployed Cilium version and destination workloads. No blanket port-rule rewrite is established by this demonstration; its policy uses only numeric TCP 8080. Keep namespace-and-pod restrictions combined as intended; separate peer entries can broaden access through OR semantics. |
+| FQDN or Layer-7 policies | These are not an automatic consequence of adopting Cilium. AKS supports L3/L4 `CiliumNetworkPolicy` and `CiliumClusterwideNetworkPolicy`; FQDN filtering and L7 policies require the applicable Advanced Container Networking Services configuration and eligibility. Review enablement and cost before using them as replacements. |
+
+Update the policy source of truth in Git/IaC, deployment pipelines and
+operational runbooks. Once translated policies are validated, retire custom
+Calico manifests from automation so they are not reapplied after migration.
+Do not bulk-delete managed system policies or CRDs simply because Calico has
+been replaced; inventory ownership and dependencies first. Avoid unsupported
+changes to `cilium-config` to imitate upstream features: Microsoft permits
+label-exclusion configuration but does not generally support arbitrary
+ConfigMap customization.
+
+### What changed for this demonstration
+
+- **No application-policy rewrite was necessary for the tested HTTP path.**
+  The existing `sample-app/allow-http` native Kubernetes policy permits
+  ingress TCP 8080 from any source to `app=sample-app`; the public service
+  forwards port 80 to 8080. Its specification was preserved during both the
+  networking migration and LTS enrollment.
+- The app has **no egress policy**, so migration did not introduce DNS or
+  outbound restrictions. This is the preserved demonstration behavior,
+  not a recommended production least-privilege baseline.
+- The exact AKS-managed Calico `aaa-allow-konnectivity-agent` rule was left
+  for AKS-managed replacement. The native Kubernetes `konnectivity-agent`
+  policy was inventoried. This managed exception must not be generalized to
+  customer-created Calico policies.
+- No custom Calico policies were translated and no Cilium-specific
+  application policies, FQDN/L7 controls or host policies were introduced.
+  Neither successful HTTP monitoring nor LTS enrollment verifies all
+  security semantics.
+
+### Customer acceptance checklist after migration
+
+Use a representative nonproduction environment and record a test matrix
+with **source, destination, port/protocol, expected allow/deny, and actual
+result**, before and after migration:
+
+1. Verify permitted traffic across namespaces/nodes to pods and ClusterIP
+   services, and from public ingress to the intended application.
+2. Verify prohibited sources cannot reach protected workloads. Use known
+   listening destinations so an application refusing a connection is not
+   mistaken for a network-policy deny.
+3. Test DNS and every essential egress dependency; include any external
+   CIDRs, node-local services, host-networked workloads and service paths.
+4. Test selector boundaries, both TCP/UDP where used, named/ranged ports
+   where present, and overlapping policies. Validate new connections after
+   rollout as well as existing connections where continuity is required.
+5. Correlate outcomes with available policy/drop telemetry, check for
+   unintended broad allows and obtain application/security-owner sign-off.
+   Keep external controls in place where continuous isolation is required.
+
+**These additional enforcement tests were not executed in this demonstration.**
+They are customer acceptance requirements/recommendations, not claimed
+results. The recorded HTTP probes validate only the allowed public app path.
+No live policy changes were made for this report update.
+
+References reviewed 25 November 2026:
+[Microsoft: Cilium limitations, `ipBlock`, supported policy resources and ACNS](https://learn.microsoft.com/azure/aks/azure-cni-powered-by-cilium)
+and [Microsoft: policy engines and managed Calico support boundaries](https://learn.microsoft.com/azure/aks/use-network-policies).
+
 ## Security assessment and boundaries
 
 The application uses a Kubernetes-native ingress NetworkPolicy allowing
